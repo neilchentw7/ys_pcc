@@ -1,30 +1,86 @@
-# -*- coding: utf-8 -*-
-"""
-app.py
-Streamlit 介面：呼叫 crawler.crawl_all() 取得資料並顯示
-"""
 import streamlit as st
-from crawler import crawl_all, AGENCIES
+import pandas as pd
+from datetime import date
+from crawler import UNITS, fetch_unit_month
+from utils import tidy_for_display
 
-st.set_page_config(page_title="政府電子採購網標案快查", layout="wide")
-st.title("📝 政府電子採購網　八大機關最新標案")
+st.set_page_config(page_title="標案即時整理", layout="wide")
+st.title("📋 指定機關招標案件整理")
 
-st.write(
-    f"本工具將依序爬取以下 **{len(AGENCIES)}** 個機關的第一頁標案：\n\n"
-    + "、".join(AGENCIES)
-    + "\n\n"
-    "後端採用 Selenium (headless Chrome)，每個機關之間隨機休息 3–8 秒，"
-    "以降低被官方反爬機制封鎖的風險。"
-)
+# ---------- Sidebar ----------
+st.sidebar.header("查詢條件")
 
-if st.button("🚀 開始抓取", type="primary"):
-    with st.spinner("資料擷取中，請稍候…"):
-        df = crawl_all()
+sel_units = st.sidebar.multiselect("選擇機關", UNITS, default=UNITS)
+sel_date = st.sidebar.date_input("查詢月份 (選任一日即可)", value=date.today())
+month_str = sel_date.replace(day=1).strftime("%Y-%m")
 
-    st.success(f"完成！共取得 {len(df)} 筆資料。")
-    st.dataframe(df, use_container_width=True)
+# ---------- 開始抓取 ----------
+if st.sidebar.button("開始抓取"):
+    dfs = [fetch_unit_month(u, month_str) for u in sel_units]
+    df_all = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
-    csv = df.to_csv(index=False, encoding="utf-8-sig")
-    st.download_button("💾 下載 CSV", csv, file_name="pcc_tenders.csv", mime="text/csv")
-else:
-    st.info("點擊上方按鈕開始抓取。")
+    if df_all.empty:
+        st.warning(f"{month_str} 無資料")
+    else:
+        st.success(f"{month_str} 共取得 {len(df_all)} 筆標案")
+
+        # ---------- 攤平 award 欄位 ----------
+        if 'award' in df_all.columns:
+            award_df = pd.json_normalize(df_all['award'])
+            award_df.columns = [f"award.{col}" for col in award_df.columns]
+            df_all = pd.concat([df_all.drop(columns=["award"]), award_df], axis=1)
+                # 👉 只保留分類為「工程類」
+        if "category" in df_all.columns:
+            df_all = df_all[df_all["category"] == "工程類"]
+            st.info(f"⚙️ 已過濾為『工程類』，剩下 {len(df_all)} 筆")
+
+        # ---------- 指定欄位 ----------
+        selected_columns = [
+            "category", "id", "name", "price", "publish", "unit",
+            "url", "end_date", "award.type", "award.url"
+        ]
+        existing_columns = [col for col in selected_columns if col in df_all.columns]
+
+        if not existing_columns:
+            st.error("❌ 找不到指定欄位，請確認資料格式是否正確")
+        else:
+            df_show = df_all[existing_columns].copy()
+
+            # ---------- 中文欄名轉換 ----------
+            rename_dict = {
+                "category": "分類",
+                "id": "標案案號",
+                "name": "標案名稱",
+                "price": "預算金額",
+                "publish": "初次招標日",
+                "unit": "主管機關",
+                "url": "招標網址",
+                "end_date": "決標日",
+                "award.type": "決標狀態",
+                "award.url": "決標網址"
+            }
+            df_show.rename(columns={col: rename_dict[col] for col in existing_columns if col in rename_dict}, inplace=True)
+
+            # ---------- 超連結格式處理 ----------
+            if "招標網址" in df_show.columns:
+                df_show["招標網址"] = df_show["招標網址"].apply(lambda x: f'<a href="{x}" target="_blank">連結</a>' if pd.notna(x) else "")
+            if "決標網址" in df_show.columns:
+                df_show["決標網址"] = df_show["決標網址"].apply(lambda x: f'<a href="{x}" target="_blank">連結</a>' if pd.notna(x) else "")
+
+            # ---------- 顯示表格 ----------
+            st.write(df_show.to_html(index=False, escape=False), unsafe_allow_html=True)
+
+            # ---------- CSV 下載（原始欄位）----------
+            csv = df_all.to_csv(index=False, encoding="utf-8-sig")
+            st.download_button(
+                "📥 下載 CSV（原始欄位）",
+                csv,
+                file_name=f"tenders_{month_str}.csv",
+                mime="text/csv",
+            )
+
+            # ---------- 關鍵字過濾 ----------
+            keyword = st.text_input("🔍 即時關鍵字過濾（標案名稱）")
+            if keyword:
+                filtered = df_show[df_show["標案名稱"].str.contains(keyword, na=False)]
+                st.write(filtered.to_html(index=False, escape=False), unsafe_allow_html=True)

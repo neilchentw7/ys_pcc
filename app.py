@@ -17,6 +17,7 @@ month_str = sel_date.replace(day=1).strftime("%Y-%m")
 # ---------- 開始抓取 ----------
 if st.sidebar.button("開始抓取"):
     dfs = [fetch_unit_month(u, month_str) for u in sel_units]
+    time.sleep(4)
     df_all = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
     if df_all.empty:
